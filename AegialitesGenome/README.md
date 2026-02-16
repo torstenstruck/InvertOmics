@@ -3,7 +3,7 @@ This folder contains the scripts used for the analyses conducted as part of the 
 
 ## Analytical procedures
 
-1. GenomeSizeEstimation_Smudgeplot_v1.1.sh: Bash script used to determine the kmer distribution using Jellyfish and pliody level using Smudgeplot.
+1. GenomeSizeEstimation_Smudgeplot_v1.1.sh: Bash script used to determine the kmer distribution using Jellyfish of the PacBio reads and ploidy level using Smudgeplot.
 2. AssemblyHifiAsm_QualityAssessment_v3.0.sh: Bash script used to assemble the genome using hifiasm, to quality check the first assemblies (primary, haplotig1 and haplotig2) using QUAST, merqury, BUSCO and BlobToolKit and to retrieve the mitochondrial genomes and identify the sequenced species.
-3. FilteredDatasets_QualityAssessment_v3.0.sh: Bash script used to to quality check the filtered assemblies using QUAST, merqury, BUSCO and BlobToolKit.
-4. 
+3. FilteredDatasets_QualityAssessment_v3.0.sh: Bash script used to quality check the filtered assemblies using QUAST, merqury, BUSCO and BlobToolKit.
+4. PurgeDups_QualityAssessment_v3.0.sh: Bash script used to purge duplicates from the filtered assemblies using Purge_Dups and to quality check the filtered and purged assemblies using QUAST, merqury, BUSCO and BlobToolKit.
