@@ -1,0 +1,207 @@
+#!/bin/sh
+
+# (c) Torsten Hugo Struck @29.04.2022 
+
+set -o errexit
+
+### Usage of pipeline ###
+# sh FilteredDatasets_QualityAssessment_v3.0.sh [Path and name to fastq file] [Name of assembly file] [Name to meryl database] [e value] [Maximum number of hits] [Maximum number of threads] > FilteredDatasets_QualityAssessment_Pipeline.out
+#
+# 1) Path and name of fastq file: name of the fastq or fasta used for the original assembly pipeline
+# 2) Name of assembly file: name of the fasta file to be used for assessing the quality
+# 3) Name of meryl database: name of the meryl database (.meryl) to be used for the merqury analyses (assuming that it is in the same folder from which the analysis is started; if this is not the case then provide the path before the name)
+# 4) e value: the e value to be used for the different blast searches (e.g., 1e-20)
+# 5) Maximum number of hits: the maximum number of hits to be saved in the blast searches (e.g., 1)
+# 6) Maximum number of threads: the maximum number of threads that should be used (e.g., 64) IMPORTANT NOTE: It must be an even number!!!
+#
+# example of usage: sh FilteredDatasets_QualityAssessment_v3.0.sh ../reads.fastq assembly.fasta reads.fastq.meryl 1e-20 1 64 > FilteredDatasets_QualityAssessment_Pipeline.out
+#
+# IMPORTANT NOTE: The parameters have to be provided in this order and a value for each parameter has to be provided!!!
+# IMPORTANT NOTE: If you do changes to the script ALWAYS save the file under a different name. Do NOT modify this master script.
+# IMPORTANT NOTE: Recovery points have still to be implemented.
+
+### Version history ###
+# v1.1: Changed from Blast+ 2.11.0 to 2.13.0; changed to Blobtools 3.1.4
+# v1.2: Commented out HapPy analyses due to re-occuring error messages (it needs to be check thoroughly checked)
+# v1.3: added Merqury analysis
+# v1.4: added missing cleaning steps
+# v1.5: made some changes to result directory structure matching other pipelines
+# v2.0: Took out HapPy analyses, fixed some minor bugs in reporting
+# v2.1: Instead of downloading a local copy each time for the BLAST search, a local copy is now download at regular intervals and the BLAST search is done against this copy
+# v3.0: Removed all code relating to the HapPy analyses, fixed some minor issues with dates and reorder moving files to folders
+
+### Variables ###
+FASTQ=$1
+ASS=$2
+MERYL=$3
+EVALUE=$4
+MAXHITS=$5
+THREADS=$6
+REDTHREADS=$((${THREADS}/2))
+SECONDS=0
+
+# print out settings for the pipeline to the log
+echo -e "The pipeline was called as follows:" > FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "sh FilteredDatasets_QualityAssessment_v3.0.sh ${FASTQ} ${ASS} ${MERYL} ${EVALUE} ${MAXHITS} ${THREADS}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "Name and path of the fastq file: ${FASTQ}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "Name of the fasta file: ${ASS}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "Name of the meryl database: ${MERYL}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "e value: ${EVALUE}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "Maximum number of saved blast hits: ${MAXHITS}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "Maximum number of threads: ${THREADS}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+DATE=$(date)
+echo -e "\nPipeline was started: $DATE" >> FilteredDatasets_QualityAssessment_Pipeline.log 
+
+### Different subscripts used during the script ###
+function Map_reads_to_assembly () {
+# Set the local variables
+local ASSEMBLY=$1
+
+module load minimap2/2.17-GCC-8.3.0
+module load SAMtools/1.10-GCC-8.3.0
+minimap2 -ax map-pb -t 16  ${ASSEMBLY} ${FASTQ} | samtools view -buS - | samtools sort - -o MappedReads_${ASSEMBLY}.sorted.bam
+samtools index MappedReads_${ASSEMBLY}.sorted.bam 
+samtools stats MappedReads_${ASSEMBLY}.sorted.bam > MappedReads_${ASSEMBLY}.sorted.bam.stats
+grep ^COV MappedReads_${ASSEMBLY}.sorted.bam.stats | cut -f 2- > MappedReads_${ASSEMBLY}.sorted.bam.stats.coverage
+module load gnuplot/5.2.8-GCCcore-8.3.0
+plot-bamstats -p MappedReads_${ASSEMBLY}.sorted.bam.sorted.bam.stats.vis MappedReads_${ASSEMBLY}.sorted.bam.stats
+echo -e "Mapping ended at time $(date).\n"
+}
+
+function BlobtoolAnalyses () {
+# Set the local variables
+local ASSEMBLY=$1
+
+module load BLAST+/2.13.0-gompi-2020a 
+
+# Generate Blast hit table for Blobtool analyses and map the reads to the assembly
+echo -e "Blast search and mapping started at $(date)"
+blastn -task megablast -query ${ASSEMBLY} -db /storage/InvertOmics/00_Scripts/NCBI_nt/nt -outfmt '6 qseqid staxids bitscore std' -max_target_seqs ${MAXHITS} -max_hsps 1 -num_threads ${REDTHREADS} -evalue ${EVALUE} -out ${ASSEMBLY}.blobplot.blast.out &
+local PID1=$!
+Map_reads_to_assembly ${ASSEMBLY} &
+local PID2=$!
+wait $PID1
+echo -e "Blast search ended at time $(date).\n"
+wait $PID2
+
+### Run actual blobtool analyses ###
+module load Blobtools/3.1.4
+
+#Create the BlobtoolsResults folder containing the assembly
+blobtools create --fasta ${ASSEMBLY} BlobtoolsResults_Filtered
+#Add blast hit information to the BlobtoolsResults folder
+blobtools add --hits ${ASSEMBLY}.blobplot.blast.out --taxrule bestsumorder --taxdump ./taxdump BlobtoolsResults_Filtered
+#Add mapping coverage to the BlobtoolsResults folder
+blobtools add --cov MappedReads_${ASSEMBLY}.sorted.bam BlobtoolsResults_Filtered
+#Add BUSCO scores to the BlobtoolsResults folder
+blobtools add --busco ./BUSCO_Metazoa_Filtered/run_metazoa_odb10/full_table.tsv BlobtoolsResults_Filtered
+}
+
+### Quality assessment using Quast on the filtered data ###
+echo -e "\nRunning QUAST analyses on the filtered contigs" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "\n${DATE}"
+echo -e "\nStep 1: Running QUAST analyses on the filtered data"
+module --quiet purge
+module load QUAST/5.0.2-foss-2020a-Python-3.8.2 
+
+# run quast on both data
+quast.py -o Quast_Filtered ${ASS}
+
+### Quality assessment using Merquery on purged primary and alternative assembly###
+echo -e "\nRunning Merqury analyses on the filtered contigs" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "\n${DATE}"
+echo -e "\nStep 2: Running Merqury analyses on the filtered contigs"
+
+module --quiet purge
+module load merqury/1.3
+
+#define path to merqury srcipts
+export MERQURY=/opt/software/custom/software/merqury-1.3/
+
+#run merqury analysis
+sh /opt/software/custom/software/merqury-1.3/merqury.sh ${MERYL} ${ASS} Filtered > Filtered_merqury.out 2> Filtered_merqury.err
+mkdir Merquery_results_Filtered
+mv Filtered\.* Merquery_results_Filtered/
+mv Filtered_mer* Merquery_results_Filtered/
+
+### BUSCO check on assembled data ###
+DURA_QUAST_SEC=$SECONDS
+DURA_QUAST=$(($DURA_QUAST_SEC/3600))
+DATE=$(date)
+echo -e "Duration of QUAST and Merqury analyses in hours: ${DURA_QUAST}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "\nRunning BUSCO analyses on the filtered contigs using the following command line: busco -i ${ASS} -l metazoa_odb10 --out BUSCO_Metazoa_Filtered -m geno -c ${THREADS} -f > Busco_${ASS}.log" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "\n${DATE}"
+echo -e "\nStep 3: Running the BUSCO analysis"
+module --quiet purge
+module load BUSCO/4.1.4-foss-2019b-Python-3.7.4 
+export AUGUSTUS_CONFIG_PATH=/storage/ConfigFiles/BRAKER2/config/
+export BUSCO_CONFIG_FILE=/storage/ConfigFiles/BUSCO/config.ini
+
+# set the BUSCO settings
+busco -i ${ASS} -l metazoa_odb10 --out BUSCO_Metazoa_Filtered -m geno -c ${THREADS} -f > Busco_${ASS}.log
+
+mv Busco_${ASS}.log BUSCO_Metazoa_Filtered/
+
+### Run blobtool analyses ###
+### load necessary for modules for the preparation steps ###
+DURA_BUSCO_SEC=$SECONDS
+DURA_BUSCO=$((($DURA_BUSCO_SEC-$DURA_QUAST_SEC)/3600))
+DATE=$(date)
+echo -e "Duration of BUSCO analysis in hours: ${DURA_BUSCO}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+
+echo -e "\nRunning the Blobtools analysis on the filtered contigs using the following command lines:" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "blastn -task megablast -query ${ASS} -db /storage/InvertOmics/00_Scripts/NCBI_nt/nt -outfmt '6 qseqid staxids bitscore std' -max_target_seqs ${MAXHITS} -max_hsps 1 -num_threads ${REDTHREADS} -evalue ${EVALUE} -out ${ASS}.blobplot.blast.out" >> FilteredDatasets_QualityAssessment_Pipeline.log
+
+echo -e "\nblobtools create --fasta ${ASS} BlobtoolsResults_Filtered" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "blobtools add --hits ${ASS}.blobplot.blast.out --taxrule bestsumorder --taxdump ./taxdump BlobtoolsResults_Filtered" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "blobtools add --cov MappedReads_${ASS}.sorted.bam BlobtoolsResults_Filtered" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "blobtools add --busco ./BUSCO_Metazoa_Filtered/run_metazoa_odb10/full_table.tsv BlobtoolsResults_Filtered" >> FilteredDatasets_QualityAssessment_Pipeline.log
+
+echo -e "\n\n*********** To display the data in a webserver do the following: ***********" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "blobtools view --remote ./BlobtoolsResults_Filtered" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "follow the instructions at https://github.com/blobtoolkit/tutorials/blob/main/2021-04-28_blobtoolkit_commandline_mollusc.md for \"Run a viewer for a BlobDir\", start at \"Run the blobtools view command:\"" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "\n${DATE}"
+echo -e "\nStep 4: Running the Blobtools analysis"
+
+#Fetch the NCBI Taxdump and blast-ready database
+mkdir -p taxdump;
+cd taxdump;
+curl -L ftp://ftp.ncbi.nih.gov/pub/taxonomy/new_taxdump/new_taxdump.tar.gz | tar xzf -;
+cd ..;
+
+module --quiet purge
+BlobtoolAnalyses ${ASS}
+
+#Background reading and help:
+#https://blobtoolkit.genomehubs.org/blobtools2/
+#https://www.youtube.com/channel/UC6QimXygwjaX2CGZ8cgjNxw
+#https://github.com/blobtoolkit/tutorials/blob/main/2021-04-28_blobtoolkit_commandline_mollusc.md
+
+#To display the data in a webserver do the following
+#blobtools view --remote ./BlobtoolsResults_Filtered 
+#follow the instructions in the last link above for "Run a viewer for a BlobDir", start at "Run the blobtools view command:"
+
+### Cleaning up folder ###
+DURA_BLOB_SEC=$SECONDS
+DURA_BLOB=$((($DURA_BLOB_SEC-$DURA_BUSCO_SEC)/3600))
+DATE=$(date)
+echo -e "Duration of the BlobTools analysis in hours: ${DURA_BLOB}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+
+echo -e "\nCleaning up the data and moving results into appropriate folders" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "\n${DATE}"
+echo -e "\nStep 6: Cleaning up the data and moving results"
+rm -rf busco_downloads/
+rm -rf busco_data
+rm -rf *.dmp nodesDB.txt nucl_gb.accession2taxid
+rm -rf taxdump/
+
+### Sorting results ###
+mkdir -p BAM_results_Filtered
+mv MappedReads_* BAM_results_Filtered/
+
+DURA_ALL=$(($SECONDS/3600))
+DATE=$(date)
+echo -e "Duration of all analyses in hours: ${DURA_ALL}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "\nThe assembly and quality assessment pipeline ended at ${DATE}" >> FilteredDatasets_QualityAssessment_Pipeline.log
+echo -e "\n${DATE}"
+echo -e "\nAnalyses finished.\n\n"
